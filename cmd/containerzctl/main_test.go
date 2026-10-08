@@ -9,6 +9,9 @@ import (
 	"testing"
 
 	containerzclient "github.com/openconfig/containerz/client"
+	containerzpb "github.com/openconfig/gnoi/containerz"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestKeyValueMap(t *testing.T) {
@@ -40,18 +43,24 @@ func TestStringList(t *testing.T) {
 	}
 }
 
-func TestWritePullProgress(t *testing.T) {
-	progress := make(chan *containerzclient.Progress, 2)
-	progress <- &containerzclient.Progress{BytesReceived: 10}
-	progress <- &containerzclient.Progress{BytesReceived: 20}
-	close(progress)
-
+func TestWritePullResponseSuccess(t *testing.T) {
 	var output bytes.Buffer
-	if err := writePullProgress(&output, progress, "example/app", "1.0"); err != nil {
-		t.Fatalf("writePullProgress(): %v", err)
+	done, err := writePullResponse(&output, &containerzpb.DeployResponse{
+		Response: &containerzpb.DeployResponse_ImageTransferSuccess{
+			ImageTransferSuccess: &containerzpb.ImageTransferSuccess{
+				Name: "example/app",
+				Tag:  "1.0",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("writePullResponse(): %v", err)
+	}
+	if !done {
+		t.Fatal("writePullResponse() did not mark success as done")
 	}
 	if got := output.String(); !strings.Contains(got, "pulled example/app:1.0") {
-		t.Fatalf("writePullProgress() output = %q", got)
+		t.Fatalf("writePullResponse() output = %q", got)
 	}
 }
 
@@ -62,14 +71,18 @@ func TestPullImageRequiresImage(t *testing.T) {
 	}
 }
 
-func TestWritePullProgressReturnsStreamError(t *testing.T) {
-	want := errors.New("pull failed")
-	progress := make(chan *containerzclient.Progress, 1)
-	progress <- &containerzclient.Progress{Error: want}
-	close(progress)
-
-	if err := writePullProgress(&bytes.Buffer{}, progress, "example/app", "1.0"); !errors.Is(err, want) {
-		t.Fatalf("writePullProgress() error = %v, want %v", err, want)
+func TestWritePullResponseReturnsTargetError(t *testing.T) {
+	response := &containerzpb.DeployResponse{
+		Response: &containerzpb.DeployResponse_ImageTransferError{
+			ImageTransferError: status.New(codes.InvalidArgument, "pull failed").Proto(),
+		},
+	}
+	done, err := writePullResponse(&bytes.Buffer{}, response)
+	if done {
+		t.Fatal("writePullResponse() marked an error as done")
+	}
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("writePullResponse() error = %v, want InvalidArgument", err)
 	}
 }
 

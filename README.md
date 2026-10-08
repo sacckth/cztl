@@ -61,8 +61,9 @@ cztl list-images
 
 Registry credentials are not exposed because the current upstream
 `PullImage` implementation does not include its credential argument in the
-request. Use `deploy` with a local archive when an anonymous pull is not
-possible.
+request. Some target implementations also support streamed uploads but not
+runtime registry pulls. If `pull-image` returns `InvalidArgument`, use `deploy`
+with a local archive.
 
 Verify that the target implements bind-backed volumes:
 

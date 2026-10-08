@@ -16,9 +16,13 @@ import (
 	"time"
 
 	containerzclient "github.com/openconfig/containerz/client"
+	commonpb "github.com/openconfig/gnoi/common"
+	containerzpb "github.com/openconfig/gnoi/containerz"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 var version = "dev"
@@ -65,6 +69,11 @@ type connectionConfig struct {
 	timeout            time.Duration
 }
 
+type clients struct {
+	containerz *containerzclient.Client
+	rpc        containerzpb.ContainerzClient
+}
+
 type stringList []string
 
 func (s *stringList) String() string { return strings.Join(*s, ",") }
@@ -106,7 +115,7 @@ func main() {
 		os.Exit(2)
 	}
 	if len(args) == 2 && (args[1] == "-h" || args[1] == "--help") {
-		if err := run(context.Background(), nil, args[0], args[1:]); err != nil && !errors.Is(err, flag.ErrHelp) {
+		if err := run(context.Background(), clients{}, args[0], args[1:]); err != nil && !errors.Is(err, flag.ErrHelp) {
 			exitf("%s: %v", args[0], err)
 		}
 		return
@@ -126,39 +135,42 @@ func main() {
 		exitf("connect: %v", err)
 	}
 	defer connection.Close()
-	client := containerzclient.NewClientWithConn(connection)
+	client := clients{
+		containerz: containerzclient.NewClientWithConn(connection),
+		rpc:        containerzpb.NewContainerzClient(connection),
+	}
 
 	if err := run(ctx, client, args[0], args[1:]); err != nil {
 		exitf("%s: %v", args[0], err)
 	}
 }
 
-func run(ctx context.Context, client *containerzclient.Client, command string, args []string) error {
+func run(ctx context.Context, client clients, command string, args []string) error {
 	switch command {
 	case "deploy":
-		return deploy(ctx, client, args)
+		return deploy(ctx, client.containerz, args)
 	case "pull-image":
-		return pullImage(ctx, client, args)
+		return pullImage(ctx, client.rpc, args)
 	case "list-images":
-		return listImages(ctx, client, args)
+		return listImages(ctx, client.containerz, args)
 	case "start":
-		return start(ctx, client, args)
+		return start(ctx, client.containerz, args)
 	case "create-volume":
-		return createVolume(ctx, client, args)
+		return createVolume(ctx, client.containerz, args)
 	case "remove-volume":
-		return removeVolume(ctx, client, args)
+		return removeVolume(ctx, client.containerz, args)
 	case "list":
-		return list(ctx, client, args)
+		return list(ctx, client.containerz, args)
 	case "logs":
-		return logs(ctx, client, args)
+		return logs(ctx, client.containerz, args)
 	case "stop":
-		return stop(ctx, client, args)
+		return stop(ctx, client.containerz, args)
 	case "remove":
-		return remove(ctx, client, args)
+		return remove(ctx, client.containerz, args)
 	case "remove-image":
-		return removeImage(ctx, client, args)
+		return removeImage(ctx, client.containerz, args)
 	case "cleanup":
-		return cleanup(ctx, client, args)
+		return cleanup(ctx, client.containerz, args)
 	default:
 		return fmt.Errorf("unknown command %q", command)
 	}
@@ -200,7 +212,7 @@ func deploy(ctx context.Context, client *containerzclient.Client, args []string)
 	return errors.New("deploy stream ended without success")
 }
 
-func pullImage(ctx context.Context, client *containerzclient.Client, args []string) error {
+func pullImage(ctx context.Context, client containerzpb.ContainerzClient, args []string) error {
 	fs := flag.NewFlagSet("pull-image", flag.ContinueOnError)
 	image := fs.String("image", "", "image name (required)")
 	tag := fs.String("tag", "latest", "image tag")
@@ -211,22 +223,64 @@ func pullImage(ctx context.Context, client *containerzclient.Client, args []stri
 		return errors.New("--image is required")
 	}
 
-	progress, err := client.PullImage(ctx, *image, *tag, nil)
+	stream, err := client.Deploy(ctx)
 	if err != nil {
 		return err
 	}
-	return writePullProgress(os.Stdout, progress, *image, *tag)
+	if err := stream.Send(&containerzpb.DeployRequest{
+		Request: &containerzpb.DeployRequest_ImageTransfer{
+			ImageTransfer: &containerzpb.ImageTransfer{
+				Name:           *image,
+				Tag:            *tag,
+				RemoteDownload: &commonpb.RemoteDownload{},
+			},
+		},
+	}); err != nil {
+		return err
+	}
+	if err := stream.CloseSend(); err != nil {
+		return err
+	}
+
+	for {
+		response, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			return errors.New("pull stream ended without success")
+		}
+		if err != nil {
+			return err
+		}
+		done, err := writePullResponse(os.Stdout, response)
+		if err != nil {
+			return err
+		}
+		if done {
+			return nil
+		}
+	}
 }
 
-func writePullProgress(w io.Writer, progress <-chan *containerzclient.Progress, image, tag string) error {
-	for update := range progress {
-		if update.Error != nil {
-			return update.Error
+func writePullResponse(w io.Writer, response *containerzpb.DeployResponse) (bool, error) {
+	switch value := response.GetResponse().(type) {
+	case *containerzpb.DeployResponse_ImageTransferProgress:
+		_, err := fmt.Fprintf(w, "\rreceived %d bytes", value.ImageTransferProgress.GetBytesReceived())
+		return false, err
+	case *containerzpb.DeployResponse_ImageTransferSuccess:
+		_, err := fmt.Fprintf(w, "\npulled %s:%s\n",
+			value.ImageTransferSuccess.GetName(),
+			value.ImageTransferSuccess.GetTag(),
+		)
+		return true, err
+	case *containerzpb.DeployResponse_ImageTransferError:
+		if value.ImageTransferError == nil {
+			return false, status.Error(codes.Unknown, "target returned an empty image transfer error")
 		}
-		fmt.Fprintf(w, "\rreceived %d bytes", update.BytesReceived)
+		return false, status.ErrorProto(value.ImageTransferError)
+	case *containerzpb.DeployResponse_ImageTransferReady:
+		return false, nil
+	default:
+		return false, fmt.Errorf("unknown pull response %T", response.GetResponse())
 	}
-	fmt.Fprintf(w, "\npulled %s:%s\n", image, tag)
-	return nil
 }
 
 func listImages(ctx context.Context, client *containerzclient.Client, args []string) error {
