@@ -1,0 +1,63 @@
+version: 2
+
+project_name: cztl
+
+builds:
+  - id: cztl
+    main: ./cmd/containerzctl
+    binary: cztl
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - id: binaries
+    ids:
+      - cztl
+    formats:
+      - binary
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+
+nfpms:
+  - id: packages
+    ids:
+      - cztl
+    package_name: cztl
+    file_name_template: >-
+      {{ .PackageName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+    vendor: sacckth
+    homepage: https://github.com/sacckth/cztl
+    maintainer: Sergio Chavez <sergio.chavez@nokia.com>
+    description: CLI for the gNOI ContainerZ service
+    license: BSD-2-Clause
+    bindir: /usr/bin
+    formats:
+      - deb
+      - rpm
+      - apk
+    contents:
+      - src: LICENSE
+        dst: /usr/share/doc/cztl/LICENSE
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
