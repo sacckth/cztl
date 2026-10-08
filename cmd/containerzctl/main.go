@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -37,19 +38,20 @@ Connection flags:
   --version                     Print version and exit
 
 Commands:
-  deploy         Upload a Docker-compatible image archive
-  list-images    List images on the target
-  start          Start a container
-  create-volume  Create a volume
-  remove-volume  Remove a volume
-  list           List containers
-  logs           Read container logs
-  stop           Stop a container
-  remove         Remove a container
-  remove-image   Remove an image
-  cleanup        Stop/remove the container and remove its image
+  deploy            Upload a Docker-compatible image archive
+  start             Start a container
+  logs              Read container logs
+  stop              Stop a container
+  cleanup           Stop/remove the container and remove its image
+  create volume     Create a volume
+  list [containers] List containers (default resource)
+  list images       List images
+  list volumes      List volumes
+  remove [container] Remove a container (default resource)
+  remove image      Remove an image
+  remove volume     Remove a volume
 
-Use "cztl <connection flags> <command> -h" for command flags.
+Use "cztl <connection flags> <command> [resource] -h" for command flags.
 `
 
 type connectionConfig struct {
@@ -104,7 +106,7 @@ func main() {
 		global.Usage()
 		os.Exit(2)
 	}
-	if len(args) == 2 && (args[1] == "-h" || args[1] == "--help") {
+	if len(args) > 1 && (args[len(args)-1] == "-h" || args[len(args)-1] == "--help") {
 		if err := run(context.Background(), nil, args[0], args[1:]); err != nil && !errors.Is(err, flag.ErrHelp) {
 			exitf("%s: %v", args[0], err)
 		}
@@ -136,28 +138,69 @@ func run(ctx context.Context, client *containerzclient.Client, command string, a
 	switch command {
 	case "deploy":
 		return deploy(ctx, client, args)
-	case "list-images":
-		return listImages(ctx, client, args)
 	case "start":
 		return start(ctx, client, args)
-	case "create-volume":
-		return createVolume(ctx, client, args)
-	case "remove-volume":
-		return removeVolume(ctx, client, args)
+	case "create":
+		return createResource(ctx, client, args)
 	case "list":
-		return list(ctx, client, args)
+		return listResource(ctx, client, args)
 	case "logs":
 		return logs(ctx, client, args)
 	case "stop":
 		return stop(ctx, client, args)
 	case "remove":
-		return remove(ctx, client, args)
-	case "remove-image":
-		return removeImage(ctx, client, args)
+		return removeResource(ctx, client, args)
 	case "cleanup":
 		return cleanup(ctx, client, args)
 	default:
 		return fmt.Errorf("unknown command %q", command)
+	}
+}
+
+func createResource(ctx context.Context, client *containerzclient.Client, args []string) error {
+	if len(args) == 0 {
+		return errors.New("create requires a resource: volume")
+	}
+	switch args[0] {
+	case "volume", "volumes":
+		return createVolume(ctx, client, args[1:])
+	case "-h", "--help":
+		fmt.Fprintln(os.Stderr, "Usage: cztl create volume [flags]")
+		return flag.ErrHelp
+	default:
+		return fmt.Errorf("unknown create resource %q; expected volume", args[0])
+	}
+}
+
+func listResource(ctx context.Context, client *containerzclient.Client, args []string) error {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return listContainers(ctx, client, args)
+	}
+	switch args[0] {
+	case "image", "images":
+		return listImages(ctx, client, args[1:])
+	case "container", "containers":
+		return listContainers(ctx, client, args[1:])
+	case "volume", "volumes":
+		return listVolumes(ctx, client, args[1:])
+	default:
+		return fmt.Errorf("unknown list resource %q; expected image, container, or volume", args[0])
+	}
+}
+
+func removeResource(ctx context.Context, client *containerzclient.Client, args []string) error {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return removeContainer(ctx, client, args)
+	}
+	switch args[0] {
+	case "image", "images":
+		return removeImage(ctx, client, args[1:])
+	case "container", "containers":
+		return removeContainer(ctx, client, args[1:])
+	case "volume", "volumes":
+		return removeVolume(ctx, client, args[1:])
+	default:
+		return fmt.Errorf("unknown remove resource %q; expected image, container, or volume", args[0])
 	}
 }
 
@@ -198,13 +241,13 @@ func deploy(ctx context.Context, client *containerzclient.Client, args []string)
 }
 
 func listImages(ctx context.Context, client *containerzclient.Client, args []string) error {
-	fs := flag.NewFlagSet("list-images", flag.ContinueOnError)
-	limit := fs.Int64("limit", -1, "maximum images to return; -1 uses the target default")
+	fs := flag.NewFlagSet("list image", flag.ContinueOnError)
+	limit := fs.Int64("limit", 0, "maximum images to return; zero means unlimited")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *limit < -1 || *limit > 1<<31-1 {
-		return errors.New("--limit must be between -1 and 2147483647")
+	if *limit < 0 || *limit > 1<<31-1 {
+		return errors.New("--limit must be between 0 and 2147483647")
 	}
 
 	images, err := client.ListImage(ctx, int32(*limit), nil)
@@ -222,6 +265,9 @@ func writeImages(w io.Writer, images <-chan *containerzclient.ImageInfo) error {
 	for image := range images {
 		if image.Error != nil {
 			return image.Error
+		}
+		if image.ID == "" && image.ImageName == "" && image.ImageTag == "" {
+			continue
 		}
 		if _, err := fmt.Fprintf(table, "%s\t%s\t%s\n", image.ID, image.ImageName, image.ImageTag); err != nil {
 			return err
@@ -308,7 +354,7 @@ func start(ctx context.Context, client *containerzclient.Client, args []string) 
 }
 
 func createVolume(ctx context.Context, client *containerzclient.Client, args []string) error {
-	fs := flag.NewFlagSet("create-volume", flag.ContinueOnError)
+	fs := flag.NewFlagSet("create volume", flag.ContinueOnError)
 	name := fs.String("name", "", "volume name")
 	driver := fs.String("driver", "local", "volume driver")
 	mountpoint := fs.String("mountpoint", "", "host path to bind (local driver shorthand)")
@@ -354,7 +400,7 @@ func keyValueMap(values []string) (map[string]string, error) {
 }
 
 func removeVolume(ctx context.Context, client *containerzclient.Client, args []string) error {
-	fs := flag.NewFlagSet("remove-volume", flag.ContinueOnError)
+	fs := flag.NewFlagSet("remove volume", flag.ContinueOnError)
 	name := fs.String("name", "", "volume name")
 	force := fs.Bool("force", false, "force volume removal")
 	if err := fs.Parse(args); err != nil {
@@ -370,8 +416,64 @@ func removeVolume(ctx context.Context, client *containerzclient.Client, args []s
 	return nil
 }
 
-func list(ctx context.Context, client *containerzclient.Client, args []string) error {
-	fs := flag.NewFlagSet("list", flag.ContinueOnError)
+func listVolumes(ctx context.Context, client *containerzclient.Client, args []string) error {
+	fs := flag.NewFlagSet("list volume", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	volumes, err := client.ListVolume(ctx, nil)
+	if err != nil {
+		return err
+	}
+	return writeVolumes(os.Stdout, volumes)
+}
+
+func writeVolumes(w io.Writer, volumes <-chan *containerzclient.VolumeInfo) error {
+	table := tabwriter.NewWriter(w, 0, 8, 1, ' ', 0)
+	if _, err := fmt.Fprintln(table, "NAME\tDRIVER\tCREATED\tOPTIONS\tLABELS"); err != nil {
+		return err
+	}
+	for volume := range volumes {
+		if volume.Error != nil {
+			return volume.Error
+		}
+		if volume.Name == "" && volume.Driver == "" && len(volume.Options) == 0 && len(volume.Labels) == 0 {
+			continue
+		}
+		created := ""
+		if !volume.CreationTime.IsZero() {
+			created = volume.CreationTime.Format(time.RFC3339)
+		}
+		if _, err := fmt.Fprintf(
+			table,
+			"%s\t%s\t%s\t%s\t%s\n",
+			volume.Name,
+			volume.Driver,
+			created,
+			formatStringMap(volume.Options),
+			formatStringMap(volume.Labels),
+		); err != nil {
+			return err
+		}
+	}
+	return table.Flush()
+}
+
+func formatStringMap(values map[string]string) string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	pairs := make([]string, 0, len(keys))
+	for _, key := range keys {
+		pairs = append(pairs, key+"="+values[key])
+	}
+	return strings.Join(pairs, ",")
+}
+
+func listContainers(ctx context.Context, client *containerzclient.Client, args []string) error {
+	fs := flag.NewFlagSet("list container", flag.ContinueOnError)
 	all := fs.Bool("all", true, "include stopped containers")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -430,8 +532,8 @@ func stop(ctx context.Context, client *containerzclient.Client, args []string) e
 	return nil
 }
 
-func remove(ctx context.Context, client *containerzclient.Client, args []string) error {
-	fs := flag.NewFlagSet("remove", flag.ContinueOnError)
+func removeContainer(ctx context.Context, client *containerzclient.Client, args []string) error {
+	fs := flag.NewFlagSet("remove container", flag.ContinueOnError)
 	instance := fs.String("instance", "", "container instance name (required)")
 	force := fs.Bool("force", false, "remove a running instance")
 	if err := fs.Parse(args); err != nil {
@@ -448,7 +550,7 @@ func remove(ctx context.Context, client *containerzclient.Client, args []string)
 }
 
 func removeImage(ctx context.Context, client *containerzclient.Client, args []string) error {
-	fs := flag.NewFlagSet("remove-image", flag.ContinueOnError)
+	fs := flag.NewFlagSet("remove image", flag.ContinueOnError)
 	image := fs.String("image", "", "image name (required)")
 	tag := fs.String("tag", "latest", "image tag")
 	force := fs.Bool("force", false, "force image removal")

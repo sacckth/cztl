@@ -4,9 +4,9 @@
 ContainerZ service. It uses the
 [`openconfig/containerz`](https://github.com/openconfig/containerz) Go client
 library rather than reimplementing the protocol. It supports image upload and
-image and container listing, container lifecycle, logs, runtime options, and
-volume lifecycle. The node-exporter walkthrough below is an example workload;
-the CLI is not tied to it.
+image, volume, and container listing, container lifecycle, logs, runtime
+options, and volume lifecycle. The node-exporter walkthrough below is an
+example workload; the CLI is not tied to it.
 
 ContainerZ requires a supported physical SR Linux platform and release. It is
 not available in SRL-SIM or the public containerlab SR Linux image.
@@ -46,6 +46,9 @@ source .env
 
 Connection settings come from `CONTAINERZ_*` environment variables or global
 flags. Run `cztl --help` and `cztl <command> --help` for the full interface.
+The `list` and `remove` commands default to the container resource; specify
+`image` or `volume` when operating on those resources. Resource names accept
+singular and plural forms; singular forms are suitable for stable automation.
 
 ## Node-exporter demo
 
@@ -67,23 +70,24 @@ cztl deploy \
   --file build/node-exporter.tar \
   --image node-exporter \
   --tag 1.12.1
-cztl list-images
+cztl list images
 ```
 
 Verify that the target implements bind-backed volumes:
 
 ```bash
-cztl create-volume \
+cztl create volume \
   --name node-exporter-compat-check --mountpoint /proc
-cztl remove-volume --name node-exporter-compat-check
+cztl remove volume --name node-exporter-compat-check
 ```
 
 Stop if that check fails. Create read-only host-data sources for the exporter:
 
 ```bash
-cztl create-volume --name node-exporter-proc --mountpoint /proc
-cztl create-volume --name node-exporter-sys --mountpoint /sys
-cztl create-volume --name node-exporter-root --mountpoint /
+cztl create volume --name node-exporter-proc --mountpoint /proc
+cztl create volume --name node-exporter-sys --mountpoint /sys
+cztl create volume --name node-exporter-root --mountpoint /
+cztl list volumes
 ```
 
 Start the image:
@@ -103,7 +107,7 @@ cztl start \
   --volume node-exporter-proc:/host/proc:ro \
   --volume node-exporter-sys:/host/sys:ro \
   --volume node-exporter-root:/host/root:ro \
-  --command '--path.procfs=/host/proc --path.sysfs=/host/sys --path.rootfs=/host/root --web.listen-address=:9100'
+  --command '/bin/node_exporter --path.procfs=/host/proc --path.sysfs=/host/sys --path.rootfs=/host/root --web.listen-address=:9100'
 ```
 
 Node-exporter configures collectors with CLI flags rather than a general
@@ -133,9 +137,9 @@ cztl cleanup \
   --instance node-exporter \
   --image node-exporter \
   --tag 1.12.1
-cztl remove-volume --name node-exporter-proc --force
-cztl remove-volume --name node-exporter-sys --force
-cztl remove-volume --name node-exporter-root --force
+cztl remove volume --name node-exporter-proc --force
+cztl remove volume --name node-exporter-sys --force
+cztl remove volume --name node-exporter-root --force
 ```
 
 ## Using another image
@@ -144,7 +148,7 @@ Upload a Docker-compatible archive and start it:
 
 ```bash
 cztl deploy --file build/app.tar --image app --tag 1.0.0
-cztl list-images --limit 20
+cztl list images --limit 20
 cztl start \
   --image app --tag 1.0.0 --instance app \
   --restart always --env KEY=value --command '--flag value'
@@ -165,9 +169,8 @@ wrap:
   pulls are therefore not portable and `cztl` uses streamed `deploy` instead;
 - container update: replace an existing container's image or runtime
   configuration, optionally asynchronously;
-- volume list: enumerate volumes already present on the target;
-- image filters: the upstream conversion is currently a TODO, so
-  `list-images` supports only a limit;
+- image and volume filters: the upstream conversion is currently a TODO, so
+  `list images` supports only a limit and `list volumes` lists all volumes;
 - plugin lifecycle: install, start, stop, list, and remove container-runtime
   managed plugins rather than normal workload containers.
 

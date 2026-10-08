@@ -11,7 +11,7 @@ SYS_VOLUME := $(VOLUME_PREFIX)-sys
 ROOT_VOLUME := $(VOLUME_PREFIX)-root
 CHECK_VOLUME := $(VOLUME_PREFIX)-compat-check
 NODE_EXPORTER_PORT ?= 9100
-NODE_EXPORTER_FLAGS ?= --path.procfs=/host/proc --path.sysfs=/host/sys --path.rootfs=/host/root --web.listen-address=:$(NODE_EXPORTER_PORT)
+NODE_EXPORTER_FLAGS ?= /bin/node_exporter --path.procfs=/host/proc --path.sysfs=/host/sys --path.rootfs=/host/root --web.listen-address=:$(NODE_EXPORTER_PORT)
 GORELEASER ?= go run github.com/goreleaser/goreleaser/v2@v2.18.2
 
 .PHONY: all test build demo demo-image demo-verify-image demo-volume-check \
@@ -39,20 +39,20 @@ demo-verify-image: demo-image
 		validate --tarball $(IMAGE_TAR)
 
 demo-volume-check: build
-	-$(CZTL) remove-volume --name $(CHECK_VOLUME) --force
-	$(CZTL) create-volume --name $(CHECK_VOLUME) --mountpoint /proc
-	$(CZTL) remove-volume --name $(CHECK_VOLUME)
+	-$(CZTL) remove volume --name $(CHECK_VOLUME) --force
+	$(CZTL) create volume --name $(CHECK_VOLUME) --mountpoint /proc
+	$(CZTL) remove volume --name $(CHECK_VOLUME)
 
 demo-volumes: build
-	$(CZTL) create-volume --name $(PROC_VOLUME) --mountpoint /proc
-	$(CZTL) create-volume --name $(SYS_VOLUME) --mountpoint /sys
-	$(CZTL) create-volume --name $(ROOT_VOLUME) --mountpoint /
+	$(CZTL) create volume --name $(PROC_VOLUME) --mountpoint /proc
+	$(CZTL) create volume --name $(SYS_VOLUME) --mountpoint /sys
+	$(CZTL) create volume --name $(ROOT_VOLUME) --mountpoint /
 
 demo-volumes-clean: build
-	-$(CZTL) remove-volume --name $(PROC_VOLUME) --force
-	-$(CZTL) remove-volume --name $(SYS_VOLUME) --force
-	-$(CZTL) remove-volume --name $(ROOT_VOLUME) --force
-	-$(CZTL) remove-volume --name $(CHECK_VOLUME) --force
+	-$(CZTL) remove volume --name $(PROC_VOLUME) --force
+	-$(CZTL) remove volume --name $(SYS_VOLUME) --force
+	-$(CZTL) remove volume --name $(ROOT_VOLUME) --force
+	-$(CZTL) remove volume --name $(CHECK_VOLUME) --force
 
 demo-deploy: build demo-image
 	$(CZTL) deploy --file $(IMAGE_TAR) --image $(IMAGE) --tag $(NODE_EXPORTER_VERSION)
