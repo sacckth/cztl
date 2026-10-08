@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
 
-	v1 "github.com/google/go-containerregistry/pkg/v1"
 	containerzclient "github.com/openconfig/containerz/client"
+	commonpb "github.com/openconfig/gnoi/common"
 	containerzpb "github.com/openconfig/gnoi/containerz"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -72,23 +74,37 @@ func TestPullImageRequiresImage(t *testing.T) {
 	}
 }
 
-func TestImageManifestSize(t *testing.T) {
-	manifest := &v1.Manifest{
-		Config: v1.Descriptor{Size: 10},
-		Layers: []v1.Descriptor{{Size: 20}, {Size: 30}},
-	}
-	got, err := imageManifestSize(manifest)
-	if err != nil {
-		t.Fatalf("imageManifestSize(): %v", err)
-	}
-	if want := uint64(60); got != want {
-		t.Fatalf("imageManifestSize() = %d, want %d", got, want)
+func TestPullImageRequiresURL(t *testing.T) {
+	err := pullImage(context.Background(), nil, []string{"--image", "example/app"})
+	if err == nil || err.Error() != "--url is required" {
+		t.Fatalf("pullImage() error = %v, want --url is required", err)
 	}
 }
 
-func TestImageManifestSizeRejectsEmptyManifest(t *testing.T) {
-	if _, err := imageManifestSize(&v1.Manifest{}); err == nil {
-		t.Fatal("imageManifestSize() accepted an empty manifest")
+func TestResolveRemoteArchiveInfersHTTPSize(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodHead {
+			t.Errorf("request method = %s, want HEAD", request.Method)
+		}
+		w.Header().Set("Content-Length", "60")
+	}))
+	defer server.Close()
+
+	got, err := resolveRemoteArchive(context.Background(), server.URL+"/image.tar", "auto", 0)
+	if err != nil {
+		t.Fatalf("resolveRemoteArchive(): %v", err)
+	}
+	if got.size != 60 {
+		t.Fatalf("resolveRemoteArchive() size = %d, want 60", got.size)
+	}
+	if got.protocol != commonpb.RemoteDownload_HTTP {
+		t.Fatalf("resolveRemoteArchive() protocol = %s, want HTTP", got.protocol)
+	}
+}
+
+func TestResolveRemoteArchiveRequiresSizeForSFTP(t *testing.T) {
+	if _, err := resolveRemoteArchive(context.Background(), "host:/image.tar", "sftp", 0); err == nil {
+		t.Fatal("resolveRemoteArchive() accepted SFTP without --image-size")
 	}
 }
 

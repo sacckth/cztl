@@ -8,6 +8,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -15,14 +17,9 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/google/go-containerregistry/pkg/authn"
-	"github.com/google/go-containerregistry/pkg/name"
-	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
 	containerzclient "github.com/openconfig/containerz/client"
 	commonpb "github.com/openconfig/gnoi/common"
 	containerzpb "github.com/openconfig/gnoi/containerz"
-	typespb "github.com/openconfig/gnoi/types"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -221,19 +218,24 @@ func pullImage(ctx context.Context, client containerzpb.ContainerzClient, args [
 	fs := flag.NewFlagSet("pull-image", flag.ContinueOnError)
 	image := fs.String("image", "", "image name (required)")
 	tag := fs.String("tag", "latest", "image tag")
-	platform := fs.String("platform", "linux/amd64", "image platform")
+	remoteURL := fs.String("url", "", "remote Docker-compatible image archive (required)")
+	protocol := fs.String("protocol", "auto", "download protocol: auto, http, https, sftp, or scp")
+	imageSize := fs.Uint64("image-size", 0, "archive size in bytes; inferred for HTTP(S)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *image == "" {
 		return errors.New("--image is required")
 	}
-
-	resolved, err := resolveRegistryImage(ctx, *image, *tag, *platform)
-	if err != nil {
-		return fmt.Errorf("resolve registry image: %w", err)
+	if *remoteURL == "" {
+		return errors.New("--url is required")
 	}
-	fmt.Printf("resolved %s:%s for %s (%d bytes)\n", *image, *tag, *platform, resolved.size)
+
+	resolved, err := resolveRemoteArchive(ctx, *remoteURL, *protocol, *imageSize)
+	if err != nil {
+		return fmt.Errorf("resolve remote archive: %w", err)
+	}
+	fmt.Printf("resolved %s (%d bytes)\n", resolved.path, resolved.size)
 
 	stream, err := client.Deploy(ctx)
 	if err != nil {
@@ -246,7 +248,8 @@ func pullImage(ctx context.Context, client containerzpb.ContainerzClient, args [
 				Tag:       *tag,
 				ImageSize: resolved.size,
 				RemoteDownload: &commonpb.RemoteDownload{
-					Credentials: resolved.credentials,
+					Path:     resolved.path,
+					Protocol: resolved.protocol,
 				},
 			},
 		},
@@ -275,84 +278,81 @@ func pullImage(ctx context.Context, client containerzpb.ContainerzClient, args [
 	}
 }
 
-type registryImage struct {
-	size        uint64
-	credentials *typespb.Credentials
+type remoteArchive struct {
+	path     string
+	size     uint64
+	protocol commonpb.RemoteDownload_Protocol
 }
 
-func resolveRegistryImage(ctx context.Context, image, tag, platform string) (registryImage, error) {
-	reference, err := name.ParseReference(image + ":" + tag)
+func resolveRemoteArchive(ctx context.Context, path, protocol string, size uint64) (remoteArchive, error) {
+	resolvedProtocol, err := remoteDownloadProtocol(path, protocol)
 	if err != nil {
-		return registryImage{}, err
+		return remoteArchive{}, err
 	}
-	targetPlatform, err := v1.ParsePlatform(platform)
-	if err != nil {
-		return registryImage{}, err
-	}
-
-	resolvedImage, err := remote.Image(
-		reference,
-		remote.WithContext(ctx),
-		remote.WithAuthFromKeychain(authn.DefaultKeychain),
-		remote.WithPlatform(*targetPlatform),
-	)
-	if err != nil {
-		return registryImage{}, err
-	}
-	manifest, err := resolvedImage.Manifest()
-	if err != nil {
-		return registryImage{}, err
-	}
-	size, err := imageManifestSize(manifest)
-	if err != nil {
-		return registryImage{}, err
-	}
-
-	credentials, err := registryCredentials(reference)
-	if err != nil {
-		return registryImage{}, err
-	}
-	return registryImage{size: size, credentials: credentials}, nil
-}
-
-func imageManifestSize(manifest *v1.Manifest) (uint64, error) {
-	if manifest == nil {
-		return 0, errors.New("registry returned an empty image manifest")
-	}
-	size := manifest.Config.Size
-	for _, layer := range manifest.Layers {
-		if layer.Size < 0 || size > 1<<63-1-layer.Size {
-			return 0, errors.New("registry returned an invalid image size")
+	if (resolvedProtocol == commonpb.RemoteDownload_HTTP ||
+		resolvedProtocol == commonpb.RemoteDownload_HTTPS) && size == 0 {
+		size, err = remoteHTTPFileSize(ctx, path, resolvedProtocol)
+		if err != nil {
+			return remoteArchive{}, err
 		}
-		size += layer.Size
 	}
-	if size <= 0 {
-		return 0, errors.New("registry returned an empty image")
+	if size == 0 {
+		return remoteArchive{}, errors.New("--image-size is required when the remote size cannot be inferred")
 	}
-	return uint64(size), nil
+	return remoteArchive{path: path, size: size, protocol: resolvedProtocol}, nil
 }
 
-func registryCredentials(reference name.Reference) (*typespb.Credentials, error) {
-	authenticator, err := authn.DefaultKeychain.Resolve(reference.Context())
+func remoteDownloadProtocol(path, protocol string) (commonpb.RemoteDownload_Protocol, error) {
+	if protocol == "auto" {
+		parsed, err := url.Parse(path)
+		if err != nil {
+			return commonpb.RemoteDownload_UNKNOWN, err
+		}
+		protocol = strings.ToLower(parsed.Scheme)
+		if protocol == "" {
+			return commonpb.RemoteDownload_UNKNOWN, errors.New("--protocol is required when --url has no scheme")
+		}
+	}
+	switch strings.ToLower(protocol) {
+	case "http":
+		return commonpb.RemoteDownload_HTTP, nil
+	case "https":
+		return commonpb.RemoteDownload_HTTPS, nil
+	case "sftp":
+		return commonpb.RemoteDownload_SFTP, nil
+	case "scp":
+		return commonpb.RemoteDownload_SCP, nil
+	default:
+		return commonpb.RemoteDownload_UNKNOWN, fmt.Errorf("unsupported protocol %q", protocol)
+	}
+}
+
+func remoteHTTPFileSize(ctx context.Context, path string, protocol commonpb.RemoteDownload_Protocol) (uint64, error) {
+	parsed, err := url.Parse(path)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	config, err := authenticator.Authorization()
+	if parsed.Scheme == "" {
+		scheme := strings.ToLower(commonpb.RemoteDownload_Protocol_name[int32(protocol)])
+		path = scheme + "://" + path
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodHead, path, nil)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	if config == nil || (config.Username == "" && config.Password == "") {
-		return nil, nil
+	request.Header.Set("Accept-Encoding", "identity")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return 0, err
 	}
-	if config.Username == "" || config.Password == "" {
-		return nil, errors.New("registry credentials must contain a username and password")
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return 0, fmt.Errorf("HEAD %s returned %s", path, response.Status)
 	}
-	return &typespb.Credentials{
-		Username: config.Username,
-		Password: &typespb.Credentials_Cleartext{
-			Cleartext: config.Password,
-		},
-	}, nil
+	if response.ContentLength <= 0 {
+		return 0, errors.New("remote server did not provide Content-Length; pass --image-size")
+	}
+	return uint64(response.ContentLength), nil
 }
 
 func writePullResponse(w io.Writer, response *containerzpb.DeployResponse) (bool, error) {

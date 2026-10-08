@@ -49,23 +49,31 @@ flags. Run `cztl --help` and `cztl <command> --help` for the full interface.
 
 ## Node-exporter demo
 
-Ask the target runtime to pull the pinned upstream image, then confirm that it
-is present. The target needs registry and DNS reachability:
+Create a Docker-compatible archive of the pinned upstream image and publish it
+at an HTTP(S) URL reachable from SR Linux:
+
+```bash
+mkdir -p build
+go run github.com/google/go-containerregistry/cmd/crane@v0.22.1 \
+  pull quay.io/prometheus/node-exporter:v1.12.1 \
+  build/node-exporter.tar --platform linux/amd64
+```
+
+Ask SR Linux to download and load that archive, then confirm it is present:
 
 ```bash
 cztl pull-image \
-  --image quay.io/prometheus/node-exporter \
-  --tag v1.12.1 \
-  --platform linux/amd64
+  --image node-exporter \
+  --tag 1.12.1 \
+  --url https://artifacts.example.net/node-exporter.tar
 cztl list-images
 ```
 
-`cztl` resolves the platform-specific registry manifest, computes the
-compressed image size required by the RPC, and reads credentials from the
-standard Docker credential chain. Run `docker login REGISTRY` first for a
-private registry. The target still needs registry and DNS reachability. Some
-target implementations support streamed uploads but not runtime registry
-pulls; use `deploy` with a local archive in that case.
+For HTTP(S), `cztl` obtains the exact archive size with a `HEAD` request.
+SFTP/SCP sources require `--protocol` and `--image-size`. SR Linux currently
+does not pass the RPC credential field to its downloader, so the URL must be
+reachable without credentials. Use `deploy` to stream a local archive when a
+remote file server is not available.
 
 Verify that the target implements bind-backed volumes:
 
@@ -87,8 +95,8 @@ Start the image:
 
 ```bash
 cztl start \
-  --image quay.io/prometheus/node-exporter \
-  --tag v1.12.1 \
+  --image node-exporter \
+  --tag 1.12.1 \
   --instance node-exporter \
   --network host \
   --restart always \
@@ -128,8 +136,8 @@ Cleanup:
 ```bash
 cztl cleanup \
   --instance node-exporter \
-  --image quay.io/prometheus/node-exporter \
-  --tag v1.12.1
+  --image node-exporter \
+  --tag 1.12.1
 cztl remove-volume --name node-exporter-proc --force
 cztl remove-volume --name node-exporter-sys --force
 cztl remove-volume --name node-exporter-root --force
@@ -137,13 +145,15 @@ cztl remove-volume --name node-exporter-root --force
 
 ## Using another image
 
-Pull an image through the target runtime:
+Have the target download a Docker-compatible archive:
 
 ```bash
-cztl pull-image --image registry.example.net/team/app --tag 1.0.0
+cztl pull-image \
+  --image app --tag 1.0.0 \
+  --url https://artifacts.example.net/app-1.0.0.tar
 cztl list-images --limit 20
 cztl start \
-  --image registry.example.net/team/app --tag 1.0.0 --instance app \
+  --image app --tag 1.0.0 --instance app \
   --restart always --env KEY=value --command '--flag value'
 ```
 
