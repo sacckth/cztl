@@ -7,10 +7,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	containerzclient "github.com/openconfig/containerz/client"
@@ -36,6 +38,8 @@ Connection flags:
 
 Commands:
   deploy         Upload a Docker-compatible image archive
+  pull-image     Pull an image through the target runtime
+  list-images    List images on the target
   start          Start a container
   create-volume  Create a volume
   remove-volume  Remove a volume
@@ -133,6 +137,10 @@ func run(ctx context.Context, client *containerzclient.Client, command string, a
 	switch command {
 	case "deploy":
 		return deploy(ctx, client, args)
+	case "pull-image":
+		return pullImage(ctx, client, args)
+	case "list-images":
+		return listImages(ctx, client, args)
 	case "start":
 		return start(ctx, client, args)
 	case "create-volume":
@@ -190,6 +198,68 @@ func deploy(ctx context.Context, client *containerzclient.Client, args []string)
 		fmt.Printf("\ruploaded %d/%d bytes (%.1f%%)", update.BytesReceived, info.Size(), percent)
 	}
 	return errors.New("deploy stream ended without success")
+}
+
+func pullImage(ctx context.Context, client *containerzclient.Client, args []string) error {
+	fs := flag.NewFlagSet("pull-image", flag.ContinueOnError)
+	image := fs.String("image", "", "image name (required)")
+	tag := fs.String("tag", "latest", "image tag")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *image == "" {
+		return errors.New("--image is required")
+	}
+
+	progress, err := client.PullImage(ctx, *image, *tag, nil)
+	if err != nil {
+		return err
+	}
+	return writePullProgress(os.Stdout, progress, *image, *tag)
+}
+
+func writePullProgress(w io.Writer, progress <-chan *containerzclient.Progress, image, tag string) error {
+	for update := range progress {
+		if update.Error != nil {
+			return update.Error
+		}
+		fmt.Fprintf(w, "\rreceived %d bytes", update.BytesReceived)
+	}
+	fmt.Fprintf(w, "\npulled %s:%s\n", image, tag)
+	return nil
+}
+
+func listImages(ctx context.Context, client *containerzclient.Client, args []string) error {
+	fs := flag.NewFlagSet("list-images", flag.ContinueOnError)
+	limit := fs.Int64("limit", -1, "maximum images to return; -1 uses the target default")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *limit < -1 || *limit > 1<<31-1 {
+		return errors.New("--limit must be between -1 and 2147483647")
+	}
+
+	images, err := client.ListImage(ctx, int32(*limit), nil)
+	if err != nil {
+		return err
+	}
+	return writeImages(os.Stdout, images)
+}
+
+func writeImages(w io.Writer, images <-chan *containerzclient.ImageInfo) error {
+	table := tabwriter.NewWriter(w, 0, 8, 1, ' ', 0)
+	if _, err := fmt.Fprintln(table, "ID\tNAME\tTAG"); err != nil {
+		return err
+	}
+	for image := range images {
+		if image.Error != nil {
+			return image.Error
+		}
+		if _, err := fmt.Fprintf(table, "%s\t%s\t%s\n", image.ID, image.ImageName, image.ImageTag); err != nil {
+			return err
+		}
+	}
+	return table.Flush()
 }
 
 func start(ctx context.Context, client *containerzclient.Client, args []string) error {

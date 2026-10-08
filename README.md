@@ -1,9 +1,12 @@
 # cztl
 
 `cztl` is a small CLI for deploying and managing OCI images through the gNOI
-ContainerZ service. It supports image upload, container lifecycle, logs,
-runtime options, and volume lifecycle. The node-exporter walkthrough below is
-an example workload; the CLI is not tied to it.
+ContainerZ service. It uses the
+[`openconfig/containerz`](https://github.com/openconfig/containerz) Go client
+library rather than reimplementing the protocol. It supports image upload and
+pull, image and container listing, container lifecycle, logs, runtime options,
+and volume lifecycle. The node-exporter walkthrough below is an example
+workload; the CLI is not tied to it.
 
 ContainerZ requires a supported physical SR Linux platform and release. It is
 not available in SRL-SIM or the public containerlab SR Linux image.
@@ -46,18 +49,22 @@ flags. Run `cztl --help` and `cztl <command> --help` for the full interface.
 
 ## Node-exporter demo
 
-Download and validate the pinned upstream image without modifying it:
+Ask the target runtime to pull the pinned upstream image, then confirm that it
+is present. The target needs registry and DNS reachability:
 
 ```bash
-mkdir -p build
-go run github.com/google/go-containerregistry/cmd/crane@v0.22.1 \
-  pull quay.io/prometheus/node-exporter:v1.12.1 \
-  build/node-exporter.tar --platform linux/amd64
-go run github.com/google/go-containerregistry/cmd/crane@v0.22.1 \
-  validate --tarball build/node-exporter.tar
+cztl pull-image \
+  --image quay.io/prometheus/node-exporter \
+  --tag v1.12.1
+cztl list-images
 ```
 
-First verify that the target implements bind-backed volumes:
+Registry credentials are not exposed because the current upstream
+`PullImage` implementation does not include its credential argument in the
+request. Use `deploy` with a local archive when an anonymous pull is not
+possible.
+
+Verify that the target implements bind-backed volumes:
 
 ```bash
 cztl create-volume \
@@ -73,17 +80,12 @@ cztl create-volume --name node-exporter-sys --mountpoint /sys
 cztl create-volume --name node-exporter-root --mountpoint /
 ```
 
-Upload and start the image:
+Start the image:
 
 ```bash
-cztl deploy \
-  --file build/node-exporter.tar \
-  --image node-exporter \
-  --tag 1.12.1
-
 cztl start \
-  --image node-exporter \
-  --tag 1.12.1 \
+  --image quay.io/prometheus/node-exporter \
+  --tag v1.12.1 \
   --instance node-exporter \
   --network host \
   --restart always \
@@ -122,7 +124,9 @@ Cleanup:
 
 ```bash
 cztl cleanup \
-  --instance node-exporter --image node-exporter --tag 1.12.1
+  --instance node-exporter \
+  --image quay.io/prometheus/node-exporter \
+  --tag v1.12.1
 cztl remove-volume --name node-exporter-proc --force
 cztl remove-volume --name node-exporter-sys --force
 cztl remove-volume --name node-exporter-root --force
@@ -130,19 +134,39 @@ cztl remove-volume --name node-exporter-root --force
 
 ## Using another image
 
-Pull any compatible `linux/amd64` image into a Docker-compatible archive, then
-use explicit image and instance names:
+Pull an image through the target runtime:
 
 ```bash
-cztl deploy --file build/app.tar --image app --tag 1.0.0
+cztl pull-image --image registry.example.net/team/app --tag 1.0.0
+cztl list-images --limit 20
 cztl start \
-  --image app --tag 1.0.0 --instance app \
+  --image registry.example.net/team/app --tag 1.0.0 --instance app \
   --restart always --env KEY=value --command '--flag value'
 ```
+
+Alternatively, create a Docker-compatible archive locally and upload it with
+`cztl deploy --file build/app.tar --image app --tag 1.0.0`.
 
 Volumes, ports, environment values, labels, devices, and capabilities are
 repeatable flags. The tool applies no workload-specific labels or resource
 limits.
+
+## Upstream scope and remaining gaps
+
+The upstream client also exposes operations that `cztl` does not currently
+wrap:
+
+- container update: replace an existing container's image or runtime
+  configuration, optionally asynchronously;
+- volume list: enumerate volumes already present on the target;
+- image filters: the upstream conversion is currently a TODO, so
+  `list-images` supports only a limit;
+- plugin lifecycle: install, start, stop, list, and remove container-runtime
+  managed plugins rather than normal workload containers.
+
+Container update and plugin operations are intentionally omitted until there
+is a tested SR Linux use case. The ContainerZ protocol and implementation are
+still marked unstable upstream.
 
 ## Make shortcuts
 
