@@ -4,12 +4,12 @@ go 1.25.0
 
 require (
 	github.com/openconfig/containerz v0.0.0-20260609094458-c9bc884e5638
-	github.com/openconfig/gnoi v0.8.1-0.20260605115014-b2cfe7eb5610
 	google.golang.org/grpc v1.79.1
 )
 
 require (
 	github.com/go-logr/logr v1.4.3 // indirect
+	github.com/openconfig/gnoi v0.8.1-0.20260605115014-b2cfe7eb5610 // indirect
 	go.opentelemetry.io/otel v1.41.0 // indirect
 	golang.org/x/net v0.48.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect

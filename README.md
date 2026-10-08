@@ -4,9 +4,9 @@
 ContainerZ service. It uses the
 [`openconfig/containerz`](https://github.com/openconfig/containerz) Go client
 library rather than reimplementing the protocol. It supports image upload and
-pull, image and container listing, container lifecycle, logs, runtime options,
-and volume lifecycle. The node-exporter walkthrough below is an example
-workload; the CLI is not tied to it.
+image and container listing, container lifecycle, logs, runtime options, and
+volume lifecycle. The node-exporter walkthrough below is an example workload;
+the CLI is not tied to it.
 
 ContainerZ requires a supported physical SR Linux platform and release. It is
 not available in SRL-SIM or the public containerlab SR Linux image.
@@ -49,31 +49,26 @@ flags. Run `cztl --help` and `cztl <command> --help` for the full interface.
 
 ## Node-exporter demo
 
-Create a Docker-compatible archive of the pinned upstream image and publish it
-at an HTTP(S) URL reachable from SR Linux:
+Create and validate a Docker-compatible archive of the pinned upstream image:
 
 ```bash
 mkdir -p build
 go run github.com/google/go-containerregistry/cmd/crane@v0.22.1 \
   pull quay.io/prometheus/node-exporter:v1.12.1 \
   build/node-exporter.tar --platform linux/amd64
+go run github.com/google/go-containerregistry/cmd/crane@v0.22.1 \
+  validate --tarball build/node-exporter.tar
 ```
 
-Ask SR Linux to download and load that archive, then confirm it is present:
+Stream the archive to SR Linux, then confirm it is present:
 
 ```bash
-cztl pull-image \
+cztl deploy \
+  --file build/node-exporter.tar \
   --image node-exporter \
-  --tag 1.12.1 \
-  --url https://artifacts.example.net/node-exporter.tar
+  --tag 1.12.1
 cztl list-images
 ```
-
-For HTTP(S), `cztl` obtains the exact archive size with a `HEAD` request.
-SFTP/SCP sources require `--protocol` and `--image-size`. SR Linux currently
-does not pass the RPC credential field to its downloader, so the URL must be
-reachable without credentials. Use `deploy` to stream a local archive when a
-remote file server is not available.
 
 Verify that the target implements bind-backed volumes:
 
@@ -145,20 +140,15 @@ cztl remove-volume --name node-exporter-root --force
 
 ## Using another image
 
-Have the target download a Docker-compatible archive:
+Upload a Docker-compatible archive and start it:
 
 ```bash
-cztl pull-image \
-  --image app --tag 1.0.0 \
-  --url https://artifacts.example.net/app-1.0.0.tar
+cztl deploy --file build/app.tar --image app --tag 1.0.0
 cztl list-images --limit 20
 cztl start \
   --image app --tag 1.0.0 --instance app \
   --restart always --env KEY=value --command '--flag value'
 ```
-
-Alternatively, create a Docker-compatible archive locally and upload it with
-`cztl deploy --file build/app.tar --image app --tag 1.0.0`.
 
 Volumes, ports, environment values, labels, devices, and capabilities are
 repeatable flags. The tool applies no workload-specific labels or resource
@@ -169,6 +159,10 @@ limits.
 The upstream client also exposes operations that `cztl` does not currently
 wrap:
 
+- image pull: the OpenConfig reference server interprets an empty
+  `RemoteDownload` as an OCI registry pull, while SR Linux requires a protocol,
+  URL, and exact size for a remotely hosted Docker archive; direct OCI registry
+  pulls are therefore not portable and `cztl` uses streamed `deploy` instead;
 - container update: replace an existing container's image or runtime
   configuration, optionally asynchronously;
 - volume list: enumerate volumes already present on the target;

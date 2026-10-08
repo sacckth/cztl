@@ -8,8 +8,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -18,13 +16,9 @@ import (
 	"time"
 
 	containerzclient "github.com/openconfig/containerz/client"
-	commonpb "github.com/openconfig/gnoi/common"
-	containerzpb "github.com/openconfig/gnoi/containerz"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/status"
 )
 
 var version = "dev"
@@ -44,7 +38,6 @@ Connection flags:
 
 Commands:
   deploy         Upload a Docker-compatible image archive
-  pull-image     Pull an image through the target runtime
   list-images    List images on the target
   start          Start a container
   create-volume  Create a volume
@@ -69,11 +62,6 @@ type connectionConfig struct {
 	passwordEnv        string
 	insecureSkipVerify bool
 	timeout            time.Duration
-}
-
-type clients struct {
-	containerz *containerzclient.Client
-	rpc        containerzpb.ContainerzClient
 }
 
 type stringList []string
@@ -117,7 +105,7 @@ func main() {
 		os.Exit(2)
 	}
 	if len(args) == 2 && (args[1] == "-h" || args[1] == "--help") {
-		if err := run(context.Background(), clients{}, args[0], args[1:]); err != nil && !errors.Is(err, flag.ErrHelp) {
+		if err := run(context.Background(), nil, args[0], args[1:]); err != nil && !errors.Is(err, flag.ErrHelp) {
 			exitf("%s: %v", args[0], err)
 		}
 		return
@@ -137,42 +125,37 @@ func main() {
 		exitf("connect: %v", err)
 	}
 	defer connection.Close()
-	client := clients{
-		containerz: containerzclient.NewClientWithConn(connection),
-		rpc:        containerzpb.NewContainerzClient(connection),
-	}
+	client := containerzclient.NewClientWithConn(connection)
 
 	if err := run(ctx, client, args[0], args[1:]); err != nil {
 		exitf("%s: %v", args[0], err)
 	}
 }
 
-func run(ctx context.Context, client clients, command string, args []string) error {
+func run(ctx context.Context, client *containerzclient.Client, command string, args []string) error {
 	switch command {
 	case "deploy":
-		return deploy(ctx, client.containerz, args)
-	case "pull-image":
-		return pullImage(ctx, client.rpc, args)
+		return deploy(ctx, client, args)
 	case "list-images":
-		return listImages(ctx, client.containerz, args)
+		return listImages(ctx, client, args)
 	case "start":
-		return start(ctx, client.containerz, args)
+		return start(ctx, client, args)
 	case "create-volume":
-		return createVolume(ctx, client.containerz, args)
+		return createVolume(ctx, client, args)
 	case "remove-volume":
-		return removeVolume(ctx, client.containerz, args)
+		return removeVolume(ctx, client, args)
 	case "list":
-		return list(ctx, client.containerz, args)
+		return list(ctx, client, args)
 	case "logs":
-		return logs(ctx, client.containerz, args)
+		return logs(ctx, client, args)
 	case "stop":
-		return stop(ctx, client.containerz, args)
+		return stop(ctx, client, args)
 	case "remove":
-		return remove(ctx, client.containerz, args)
+		return remove(ctx, client, args)
 	case "remove-image":
-		return removeImage(ctx, client.containerz, args)
+		return removeImage(ctx, client, args)
 	case "cleanup":
-		return cleanup(ctx, client.containerz, args)
+		return cleanup(ctx, client, args)
 	default:
 		return fmt.Errorf("unknown command %q", command)
 	}
@@ -212,170 +195,6 @@ func deploy(ctx context.Context, client *containerzclient.Client, args []string)
 		fmt.Printf("\ruploaded %d/%d bytes (%.1f%%)", update.BytesReceived, info.Size(), percent)
 	}
 	return errors.New("deploy stream ended without success")
-}
-
-func pullImage(ctx context.Context, client containerzpb.ContainerzClient, args []string) error {
-	fs := flag.NewFlagSet("pull-image", flag.ContinueOnError)
-	image := fs.String("image", "", "image name (required)")
-	tag := fs.String("tag", "latest", "image tag")
-	remoteURL := fs.String("url", "", "remote Docker-compatible image archive (required)")
-	protocol := fs.String("protocol", "auto", "download protocol: auto, http, https, sftp, or scp")
-	imageSize := fs.Uint64("image-size", 0, "archive size in bytes; inferred for HTTP(S)")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *image == "" {
-		return errors.New("--image is required")
-	}
-	if *remoteURL == "" {
-		return errors.New("--url is required")
-	}
-
-	resolved, err := resolveRemoteArchive(ctx, *remoteURL, *protocol, *imageSize)
-	if err != nil {
-		return fmt.Errorf("resolve remote archive: %w", err)
-	}
-	fmt.Printf("resolved %s (%d bytes)\n", resolved.path, resolved.size)
-
-	stream, err := client.Deploy(ctx)
-	if err != nil {
-		return err
-	}
-	if err := stream.Send(&containerzpb.DeployRequest{
-		Request: &containerzpb.DeployRequest_ImageTransfer{
-			ImageTransfer: &containerzpb.ImageTransfer{
-				Name:      *image,
-				Tag:       *tag,
-				ImageSize: resolved.size,
-				RemoteDownload: &commonpb.RemoteDownload{
-					Path:     resolved.path,
-					Protocol: resolved.protocol,
-				},
-			},
-		},
-	}); err != nil {
-		return err
-	}
-	if err := stream.CloseSend(); err != nil {
-		return err
-	}
-
-	for {
-		response, err := stream.Recv()
-		if errors.Is(err, io.EOF) {
-			return errors.New("pull stream ended without success")
-		}
-		if err != nil {
-			return err
-		}
-		done, err := writePullResponse(os.Stdout, response)
-		if err != nil {
-			return err
-		}
-		if done {
-			return nil
-		}
-	}
-}
-
-type remoteArchive struct {
-	path     string
-	size     uint64
-	protocol commonpb.RemoteDownload_Protocol
-}
-
-func resolveRemoteArchive(ctx context.Context, path, protocol string, size uint64) (remoteArchive, error) {
-	resolvedProtocol, err := remoteDownloadProtocol(path, protocol)
-	if err != nil {
-		return remoteArchive{}, err
-	}
-	if (resolvedProtocol == commonpb.RemoteDownload_HTTP ||
-		resolvedProtocol == commonpb.RemoteDownload_HTTPS) && size == 0 {
-		size, err = remoteHTTPFileSize(ctx, path, resolvedProtocol)
-		if err != nil {
-			return remoteArchive{}, err
-		}
-	}
-	if size == 0 {
-		return remoteArchive{}, errors.New("--image-size is required when the remote size cannot be inferred")
-	}
-	return remoteArchive{path: path, size: size, protocol: resolvedProtocol}, nil
-}
-
-func remoteDownloadProtocol(path, protocol string) (commonpb.RemoteDownload_Protocol, error) {
-	if protocol == "auto" {
-		parsed, err := url.Parse(path)
-		if err != nil {
-			return commonpb.RemoteDownload_UNKNOWN, err
-		}
-		protocol = strings.ToLower(parsed.Scheme)
-		if protocol == "" {
-			return commonpb.RemoteDownload_UNKNOWN, errors.New("--protocol is required when --url has no scheme")
-		}
-	}
-	switch strings.ToLower(protocol) {
-	case "http":
-		return commonpb.RemoteDownload_HTTP, nil
-	case "https":
-		return commonpb.RemoteDownload_HTTPS, nil
-	case "sftp":
-		return commonpb.RemoteDownload_SFTP, nil
-	case "scp":
-		return commonpb.RemoteDownload_SCP, nil
-	default:
-		return commonpb.RemoteDownload_UNKNOWN, fmt.Errorf("unsupported protocol %q", protocol)
-	}
-}
-
-func remoteHTTPFileSize(ctx context.Context, path string, protocol commonpb.RemoteDownload_Protocol) (uint64, error) {
-	parsed, err := url.Parse(path)
-	if err != nil {
-		return 0, err
-	}
-	if parsed.Scheme == "" {
-		scheme := strings.ToLower(commonpb.RemoteDownload_Protocol_name[int32(protocol)])
-		path = scheme + "://" + path
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodHead, path, nil)
-	if err != nil {
-		return 0, err
-	}
-	request.Header.Set("Accept-Encoding", "identity")
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		return 0, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return 0, fmt.Errorf("HEAD %s returned %s", path, response.Status)
-	}
-	if response.ContentLength <= 0 {
-		return 0, errors.New("remote server did not provide Content-Length; pass --image-size")
-	}
-	return uint64(response.ContentLength), nil
-}
-
-func writePullResponse(w io.Writer, response *containerzpb.DeployResponse) (bool, error) {
-	switch value := response.GetResponse().(type) {
-	case *containerzpb.DeployResponse_ImageTransferProgress:
-		_, err := fmt.Fprintf(w, "\rreceived %d bytes", value.ImageTransferProgress.GetBytesReceived())
-		return false, err
-	case *containerzpb.DeployResponse_ImageTransferSuccess:
-		_, err := fmt.Fprintf(w, "\npulled %s:%s\n",
-			value.ImageTransferSuccess.GetName(),
-			value.ImageTransferSuccess.GetTag(),
-		)
-		return true, err
-	case *containerzpb.DeployResponse_ImageTransferError:
-		if value.ImageTransferError == nil {
-			return false, status.Error(codes.Unknown, "target returned an empty image transfer error")
-		}
-		return false, status.ErrorProto(value.ImageTransferError)
-	case *containerzpb.DeployResponse_ImageTransferReady:
-		return false, nil
-	default:
-		return false, fmt.Errorf("unknown pull response %T", response.GetResponse())
-	}
 }
 
 func listImages(ctx context.Context, client *containerzclient.Client, args []string) error {
