@@ -12,7 +12,7 @@ ROOT_VOLUME := $(VOLUME_PREFIX)-root
 CHECK_VOLUME := $(VOLUME_PREFIX)-compat-check
 NODE_EXPORTER_PORT ?= 9100
 NODE_EXPORTER_FLAGS ?= --path.procfs=/host/proc --path.sysfs=/host/sys --path.rootfs=/host/root --web.listen-address=:$(NODE_EXPORTER_PORT)
-GORELEASER ?= go run github.com/goreleaser/goreleaser/v2@v2.17.0
+GORELEASER ?= go run github.com/goreleaser/goreleaser/v2@v2.18.2
 
 .PHONY: all test build demo demo-image demo-verify-image demo-volume-check \
 	demo-volumes demo-volumes-clean demo-deploy demo-start demo-list \
