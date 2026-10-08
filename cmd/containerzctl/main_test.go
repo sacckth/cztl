@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 	containerzclient "github.com/openconfig/containerz/client"
 	containerzpb "github.com/openconfig/gnoi/containerz"
 	"google.golang.org/grpc/codes"
@@ -68,6 +69,26 @@ func TestPullImageRequiresImage(t *testing.T) {
 	err := pullImage(context.Background(), nil, nil)
 	if err == nil || err.Error() != "--image is required" {
 		t.Fatalf("pullImage() error = %v, want --image is required", err)
+	}
+}
+
+func TestImageManifestSize(t *testing.T) {
+	manifest := &v1.Manifest{
+		Config: v1.Descriptor{Size: 10},
+		Layers: []v1.Descriptor{{Size: 20}, {Size: 30}},
+	}
+	got, err := imageManifestSize(manifest)
+	if err != nil {
+		t.Fatalf("imageManifestSize(): %v", err)
+	}
+	if want := uint64(60); got != want {
+		t.Fatalf("imageManifestSize() = %d, want %d", got, want)
+	}
+}
+
+func TestImageManifestSizeRejectsEmptyManifest(t *testing.T) {
+	if _, err := imageManifestSize(&v1.Manifest{}); err == nil {
+		t.Fatal("imageManifestSize() accepted an empty manifest")
 	}
 }
 

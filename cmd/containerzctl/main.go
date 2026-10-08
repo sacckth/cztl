@@ -15,9 +15,14 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/google/go-containerregistry/pkg/authn"
+	"github.com/google/go-containerregistry/pkg/name"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 	containerzclient "github.com/openconfig/containerz/client"
 	commonpb "github.com/openconfig/gnoi/common"
 	containerzpb "github.com/openconfig/gnoi/containerz"
+	typespb "github.com/openconfig/gnoi/types"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -216,12 +221,19 @@ func pullImage(ctx context.Context, client containerzpb.ContainerzClient, args [
 	fs := flag.NewFlagSet("pull-image", flag.ContinueOnError)
 	image := fs.String("image", "", "image name (required)")
 	tag := fs.String("tag", "latest", "image tag")
+	platform := fs.String("platform", "linux/amd64", "image platform")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *image == "" {
 		return errors.New("--image is required")
 	}
+
+	resolved, err := resolveRegistryImage(ctx, *image, *tag, *platform)
+	if err != nil {
+		return fmt.Errorf("resolve registry image: %w", err)
+	}
+	fmt.Printf("resolved %s:%s for %s (%d bytes)\n", *image, *tag, *platform, resolved.size)
 
 	stream, err := client.Deploy(ctx)
 	if err != nil {
@@ -230,9 +242,12 @@ func pullImage(ctx context.Context, client containerzpb.ContainerzClient, args [
 	if err := stream.Send(&containerzpb.DeployRequest{
 		Request: &containerzpb.DeployRequest_ImageTransfer{
 			ImageTransfer: &containerzpb.ImageTransfer{
-				Name:           *image,
-				Tag:            *tag,
-				RemoteDownload: &commonpb.RemoteDownload{},
+				Name:      *image,
+				Tag:       *tag,
+				ImageSize: resolved.size,
+				RemoteDownload: &commonpb.RemoteDownload{
+					Credentials: resolved.credentials,
+				},
 			},
 		},
 	}); err != nil {
@@ -258,6 +273,86 @@ func pullImage(ctx context.Context, client containerzpb.ContainerzClient, args [
 			return nil
 		}
 	}
+}
+
+type registryImage struct {
+	size        uint64
+	credentials *typespb.Credentials
+}
+
+func resolveRegistryImage(ctx context.Context, image, tag, platform string) (registryImage, error) {
+	reference, err := name.ParseReference(image + ":" + tag)
+	if err != nil {
+		return registryImage{}, err
+	}
+	targetPlatform, err := v1.ParsePlatform(platform)
+	if err != nil {
+		return registryImage{}, err
+	}
+
+	resolvedImage, err := remote.Image(
+		reference,
+		remote.WithContext(ctx),
+		remote.WithAuthFromKeychain(authn.DefaultKeychain),
+		remote.WithPlatform(*targetPlatform),
+	)
+	if err != nil {
+		return registryImage{}, err
+	}
+	manifest, err := resolvedImage.Manifest()
+	if err != nil {
+		return registryImage{}, err
+	}
+	size, err := imageManifestSize(manifest)
+	if err != nil {
+		return registryImage{}, err
+	}
+
+	credentials, err := registryCredentials(reference)
+	if err != nil {
+		return registryImage{}, err
+	}
+	return registryImage{size: size, credentials: credentials}, nil
+}
+
+func imageManifestSize(manifest *v1.Manifest) (uint64, error) {
+	if manifest == nil {
+		return 0, errors.New("registry returned an empty image manifest")
+	}
+	size := manifest.Config.Size
+	for _, layer := range manifest.Layers {
+		if layer.Size < 0 || size > 1<<63-1-layer.Size {
+			return 0, errors.New("registry returned an invalid image size")
+		}
+		size += layer.Size
+	}
+	if size <= 0 {
+		return 0, errors.New("registry returned an empty image")
+	}
+	return uint64(size), nil
+}
+
+func registryCredentials(reference name.Reference) (*typespb.Credentials, error) {
+	authenticator, err := authn.DefaultKeychain.Resolve(reference.Context())
+	if err != nil {
+		return nil, err
+	}
+	config, err := authenticator.Authorization()
+	if err != nil {
+		return nil, err
+	}
+	if config == nil || (config.Username == "" && config.Password == "") {
+		return nil, nil
+	}
+	if config.Username == "" || config.Password == "" {
+		return nil, errors.New("registry credentials must contain a username and password")
+	}
+	return &typespb.Credentials{
+		Username: config.Username,
+		Password: &typespb.Credentials_Cleartext{
+			Cleartext: config.Password,
+		},
+	}, nil
 }
 
 func writePullResponse(w io.Writer, response *containerzpb.DeployResponse) (bool, error) {

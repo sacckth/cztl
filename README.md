@@ -55,15 +55,17 @@ is present. The target needs registry and DNS reachability:
 ```bash
 cztl pull-image \
   --image quay.io/prometheus/node-exporter \
-  --tag v1.12.1
+  --tag v1.12.1 \
+  --platform linux/amd64
 cztl list-images
 ```
 
-Registry credentials are not exposed because the current upstream
-`PullImage` implementation does not include its credential argument in the
-request. Some target implementations also support streamed uploads but not
-runtime registry pulls. If `pull-image` returns `InvalidArgument`, use `deploy`
-with a local archive.
+`cztl` resolves the platform-specific registry manifest, computes the
+compressed image size required by the RPC, and reads credentials from the
+standard Docker credential chain. Run `docker login REGISTRY` first for a
+private registry. The target still needs registry and DNS reachability. Some
+target implementations support streamed uploads but not runtime registry
+pulls; use `deploy` with a local archive in that case.
 
 Verify that the target implements bind-backed volumes:
 
