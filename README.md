@@ -149,6 +149,6 @@ limits.
 The Makefile is optional. `make all` tests and builds `build/cztl`.
 `make demo` also downloads and validates node-exporter. The remaining example
 targets are `demo-volume-check`, `demo-volumes`, `demo-deploy`, `demo-start`,
-`demo-list`, `demo-logs`, and `demo-cleanup`. GoReleaser v2 users can run
-`make release-check` or `make release-snapshot`; pushing a `v*` tag publishes
-the release through GitHub Actions.
+`demo-list`, `demo-logs`, and `demo-cleanup`. Run `make release-check` or
+`make release-snapshot` for release work; pushing a `v*` tag publishes the
+release through GitHub Actions.
