@@ -2,6 +2,8 @@ module github.com/sacckth/cztl
 
 go 1.25.0
 
+toolchain go1.27.1
+
 require (
 	github.com/openconfig/containerz v0.0.0-20260609094458-c9bc884e5638
 	google.golang.org/grpc v1.79.1

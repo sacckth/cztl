@@ -13,7 +13,7 @@ not available in SRL-SIM or the public containerlab SR Linux image.
 
 ## Prerequisites
 
-- Go 1.25 or later
+- Go 1.27.1
 - a physical SR Linux node with a TLS gRPC server serving `gnoi.containerz`
 - SR Linux AAA credentials and the server CA certificate
 - network and CPM-filter policy permitting the workload's traffic
