@@ -186,3 +186,7 @@ targets are `demo-volume-check`, `demo-volumes`, `demo-deploy`, `demo-start`,
 `demo-list`, `demo-logs`, and `demo-cleanup`. Run `make release-check` or
 `make release-snapshot` for release work; pushing a `v*` tag publishes the
 release through GitHub Actions.
+
+## License
+
+BSD 3-Clause. See [LICENSE](LICENSE).

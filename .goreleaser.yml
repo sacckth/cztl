@@ -42,7 +42,7 @@ nfpms:
     homepage: https://github.com/sacckth/cztl
     maintainer: Sergio Chavez <sergio.chavez@nokia.com>
     description: CLI for the gNOI ContainerZ service
-    license: BSD-2-Clause
+    license: BSD-3-Clause
     bindir: /usr/bin
     formats:
       - deb
